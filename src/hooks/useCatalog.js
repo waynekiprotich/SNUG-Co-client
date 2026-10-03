@@ -1,28 +1,35 @@
-import { useCallback, useEffect, useReducer } from 'react'
-import { forget, homeKey, listingKey, loadHome, loadListing, loadProduct, NotFoundError, peek, productKey } from '../lib/catalog'
+import { useCallback, useEffect, useReducer, useSyncExternalStore } from 'react'
+import {
+  forget,
+  getVersion,
+  homeKey,
+  listingKey,
+  loadHome,
+  loadListing,
+  loadProduct,
+  NotFoundError,
+  peek,
+  productKey,
+  subscribe,
+} from '../lib/catalog'
 
 // status: 'idle' (not asked for yet), 'loading', 'ready', 'missing' (404) or 'error'.
+// 'ready' can come from this browser's copy while fresh data loads; the page updates when it lands.
 function useResource(key, loader, enabled = true) {
-  const [attempt, rerender] = useReducer((n) => n + 1, 0)
+  useSyncExternalStore(subscribe, getVersion)
+  const [attempt, retryLoad] = useReducer((n) => n + 1, 0)
   const entry = peek(key)
 
   useEffect(() => {
-    if (!enabled || peek(key)) return
-    let active = true
-    loader().then(
-      () => active && rerender(),
-      () => active && rerender(),
-    )
-    return () => {
-      active = false
-    }
+    if (!enabled) return
+    loader().catch(() => {})
     // loader is derived from key.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, enabled, attempt])
 
   const retry = useCallback(() => {
     forget(key)
-    rerender()
+    retryLoad()
   }, [key])
 
   const status = entry?.data

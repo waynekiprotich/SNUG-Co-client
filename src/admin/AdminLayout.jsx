@@ -75,7 +75,7 @@ export function Component() {
               <span className="text-sm text-stone">Admin</span>
             </div>
             <div className="flex items-center gap-4 text-sm">
-              <Link to="/" target="_blank" className="link">
+              <Link to="/" target="_blank" rel="noopener noreferrer" className="link">
                 View site
               </Link>
               <span className="hidden text-stone sm:inline">{admin.email}</span>

@@ -3,15 +3,14 @@ import { Link } from 'react-router-dom'
 import { WhatsAppIcon } from '../components/Icons'
 import { Img } from '../components/Img'
 import { QuantitySelector } from '../components/product/VariantSelector'
-import { CatalogError, EmptyState, ShopperUnavailable } from '../components/States'
+import { EmptyState, ShopperUnavailable } from '../components/States'
 import { useListing } from '../hooks/useCatalog'
 import { EVENTS, track } from '../lib/analytics'
 import { formatPrice } from '../lib/format'
+import { describeChange, linesChanged, orderChanges, UNORDERABLE } from '../lib/order'
 import { absoluteUrl, useSeo } from '../lib/seo'
-import { cartCount, clearCart, loadShopper, removeFromCart, setCartQuantity, useShopper } from '../lib/shopper'
-import { cartMessage, whatsappLink } from '../lib/whatsapp'
-
-const UNORDERABLE = new Set(['sold-out', 'coming-soon'])
+import { cartCount, clearCart, loadShopper, refreshShopper, removeFromCart, setCartQuantity, useShopper } from '../lib/shopper'
+import { cartMessage, openWhatsApp, whatsappLink } from '../lib/whatsapp'
 
 function choicesText(line) {
   return [line.color, line.size && `Size ${line.size}`, ...Object.entries(line.options || {}).map(([k, v]) => `${k}: ${v}`)]
@@ -19,19 +18,35 @@ function choicesText(line) {
     .join(' · ')
 }
 
+// Name, price and availability come from the bag response, which the server never caches. The
+// shop listing (possibly this browser's copy) only adds photos and sizes.
+function bagItems(cart, products, listed) {
+  return cart
+    .map((line) => {
+      const fresh = products[line.productId]
+      const shown = listed.get(line.productId)
+      return { line, product: fresh ? { images: [], ...shown, ...fresh } : shown }
+    })
+    .filter((i) => i.product)
+}
+
+const isOrderable = (i) => !UNORDERABLE.has(i.product.availability)
+
 export default function Cart() {
   useSeo({ title: 'Your bag', path: '/cart' })
-  const { status, catalog, retry } = useListing()
+  const { catalog } = useListing()
   const shopper = useShopper({ force: true })
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState(null)
+  const [changes, setChanges] = useState([])
+  const [checking, setChecking] = useState(false)
 
-  const byId = new Map((catalog?.products ?? []).map((p) => [p.id, p]))
-  const items = shopper.cart.map((line) => ({ line, product: byId.get(line.productId) })).filter((i) => i.product)
-  const orderable = items.filter((i) => !UNORDERABLE.has(i.product.availability))
+  const listed = new Map((catalog?.products ?? []).map((p) => [p.id, p]))
+  const items = bagItems(shopper.cart, shopper.products, listed)
+  const orderable = items.filter(isOrderable)
   const total = orderable.reduce((sum, i) => sum + (i.product.priceKES ?? 0) * i.line.quantity, 0)
   const unpriced = orderable.filter((i) => i.product.priceKES == null).length
-  const loading = status === 'loading' || !shopper.ready
+  const loading = !shopper.ready
   const failed = shopper.ready && shopper.error
 
   const run = async (task) => {
@@ -47,19 +62,42 @@ export default function Cart() {
     }
   }
 
-  const href = whatsappLink(
-    cartMessage(orderable.map(({ product, line }) => ({ product, line, url: absoluteUrl(`/product/${product.slug}`) }))),
-  )
+  // The bag is fetched again right before WhatsApp opens. If a price, an availability or the bag
+  // itself changed since it was shown, nothing is sent: the page updates and says what changed.
+  const checkout = () =>
+    run(async () => {
+      setChanges([])
+      setChecking(true)
+      const shownLines = shopper.cart
+      const shownItems = items.map((i) => i.product)
+      try {
+        const opened = await openWhatsApp(async () => {
+          const fresh = await refreshShopper()
+          // No current prices in the reply (an older server): don't send anything unchecked.
+          if (!fresh.products) throw new Error('We couldn’t confirm your order. Try again in a moment.')
+          const found = orderChanges(shownItems, fresh.products)
+          if (found.length || linesChanged(shownLines, fresh.cart)) {
+            setChanges(found.length ? found.map(describeChange) : ['Your bag was changed in another window.'])
+            return null
+          }
+          const ordered = bagItems(fresh.cart, fresh.products, listed).filter(isOrderable)
+          if (!ordered.length) return null
+          return whatsappLink(
+            cartMessage(ordered.map(({ product, line }) => ({ product, line, url: absoluteUrl(`/product/${product.slug}`) }))),
+          )
+        })
+        if (opened) {
+          track(EVENTS.whatsappCartOrderClicked, { pieces: cartCount(orderable.map((i) => i.line)), total, unpriced })
+        }
+      } finally {
+        setChecking(false)
+      }
+    })
 
   return (
     <div className="shell pb-24 pt-10 lg:pb-28 lg:pt-16">
       <h1 className="type-display">Your bag</h1>
 
-      {status === 'error' && (
-        <div className="mt-10">
-          <CatalogError onRetry={retry} />
-        </div>
-      )}
       {loading && <div className="skeleton mt-10 h-40" aria-label="Loading your bag" role="status" />}
       {failed && (
         <div className="mt-10">
@@ -67,7 +105,7 @@ export default function Cart() {
         </div>
       )}
 
-      {!loading && !failed && status === 'ready' && items.length === 0 && (
+      {!loading && !failed && items.length === 0 && (
         <div className="mt-10">
           <EmptyState
             title="Your bag is empty."
@@ -160,19 +198,26 @@ export default function Cart() {
                     : `${unpriced === 1 ? 'One piece has' : `${unpriced} pieces have`} a price we’ll confirm on WhatsApp.`}
                 </p>
               )}
-              <a
-                href={href}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={`btn btn-primary mt-6 min-h-14 w-full text-base ${orderable.length ? '' : 'pointer-events-none opacity-50'}`}
-                aria-disabled={orderable.length === 0}
-                onClick={() =>
-                  track(EVENTS.whatsappCartOrderClicked, { pieces: cartCount(orderable.map((i) => i.line)), total, unpriced })
-                }
+              {changes.length > 0 && (
+                <div role="alert" className="mt-5 border-l-2 border-alert pl-4 text-sm">
+                  <p className="font-medium text-alert">Your bag changed since you opened it:</p>
+                  <ul className="mt-2 space-y-1">
+                    {changes.map((change) => (
+                      <li key={change}>{change}</li>
+                    ))}
+                  </ul>
+                  <p className="mt-2 text-stone">Your bag now shows the current details. Check it, then tap Order on WhatsApp again.</p>
+                </div>
+              )}
+              <button
+                type="button"
+                className="btn btn-primary mt-6 min-h-14 w-full text-base"
+                disabled={busy || orderable.length === 0}
+                onClick={checkout}
               >
                 <WhatsAppIcon />
-                Order on WhatsApp
-              </a>
+                {checking ? 'Checking your order…' : 'Order on WhatsApp'}
+              </button>
               <p className="mt-3 text-sm text-stone">
                 We open WhatsApp with your whole bag in one message. You’ll confirm availability, payment and delivery with us
                 there.{' '}

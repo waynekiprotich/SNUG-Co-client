@@ -7,7 +7,10 @@ export function AnnouncementBar() {
   const href = settings?.announcementHref
 
   if (!text) return null
-  const isInternal = href?.startsWith('/')
+  // The API only accepts these two forms; checked again because settings are also read back from
+  // this browser's storage. Anything else shows as plain text.
+  const isInternal = /^\/(?![/\\])/.test(href ?? '')
+  const isExternal = /^https?:\/\//i.test(href ?? '')
   return (
     <div className="bg-bar text-on-bar">
       <div className="shell flex min-h-9 items-center justify-center py-2 text-center text-[0.8125rem] tracking-[0.01em]">
@@ -15,7 +18,7 @@ export function AnnouncementBar() {
           <Link to={href} className="link">
             {text}
           </Link>
-        ) : href ? (
+        ) : isExternal ? (
           <a href={href} className="link">
             {text}
           </a>

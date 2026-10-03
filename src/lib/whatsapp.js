@@ -20,6 +20,38 @@ export function generalInquiryLink() {
   return whatsappLink(site.whatsapp.generalMessage)
 }
 
+/**
+ * Open WhatsApp once `prepare` returns its link, or not at all if it returns null (the order
+ * changed) or throws. The tab is opened at once, inside the tap, because browsers block tabs
+ * opened after waiting on the network; it's closed again if the order can't go ahead. Without a
+ * tab (popup blocked), this page goes to WhatsApp instead. Returns true when WhatsApp opened.
+ */
+export async function openWhatsApp(prepare) {
+  const tab = window.open('', '_blank')
+  try {
+    if (tab) {
+      tab.document.title = 'Opening WhatsApp…'
+      tab.document.body?.append('Checking your order…')
+    }
+  } catch {
+    // Some browsers don't allow touching the new tab; it just stays blank for a moment.
+  }
+  let url = null
+  try {
+    url = await prepare()
+  } finally {
+    if (!url) tab?.close()
+  }
+  if (!url) return false
+  if (tab) {
+    tab.opener = null
+    tab.location.replace(url)
+  } else {
+    window.location.assign(url)
+  }
+  return true
+}
+
 export function orderMessage({ product, selection, productUrl }) {
   const lines = [`Hi ${site.brandName}, I'd like to order the ${product.name}.`, '']
 

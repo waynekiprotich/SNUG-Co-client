@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
@@ -48,6 +49,42 @@ function siteFiles(siteUrl) {
   }
 }
 
+// The built site's Content-Security-Policy, as a <meta> tag so it travels with index.html wherever
+// it's served (Vercel, or Flask). It lists only what the storefront and admin load: the site's own
+// files and /api, Google Fonts, and Cloudinary photos. The two inline scripts in index.html are
+// allowed by hash, worked out here after the build has filled them in. frame-ancestors can't go in
+// a meta tag, so it stays in the vercel.json and Flask response headers.
+function contentSecurityPolicy(env) {
+  return {
+    name: 'snug-csp',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(html) {
+        const hashes = [...html.matchAll(/<script(?![^>]*\ssrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(
+          ([, body]) => `'sha256-${createHash('sha256').update(body).digest('base64')}'`,
+        )
+        const apiOrigin = /^https?:\/\//.test(env.VITE_API_URL || '') ? ` ${new URL(env.VITE_API_URL).origin}` : ''
+        const policy = [
+          "default-src 'self'",
+          `script-src 'self' ${hashes.join(' ')}`,
+          "style-src 'self' https://fonts.googleapis.com",
+          'font-src https://fonts.gstatic.com',
+          "img-src 'self' https://res.cloudinary.com",
+          `connect-src 'self'${apiOrigin}`,
+          "object-src 'none'",
+          "base-uri 'self'",
+          "form-action 'self'",
+        ].join('; ')
+        return html.replace(
+          '<meta charset="UTF-8" />',
+          `<meta charset="UTF-8" />\n    <meta http-equiv="Content-Security-Policy" content="${policy}" />`,
+        )
+      },
+    },
+  }
+}
+
 export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const siteUrl = (env.VITE_SITE_URL || '').trim().replace(/\/+$/, '')
@@ -61,7 +98,7 @@ export default defineConfig(({ command, mode }) => {
   }
 
   return {
-    plugins: [react(), tailwindcss(), siteFiles(siteUrl)],
+    plugins: [react(), tailwindcss(), siteFiles(siteUrl), contentSecurityPolicy(env)],
     server: {
       // Keep changeOrigin false: the API checks Origin against Host.
       proxy: {

@@ -17,11 +17,18 @@ export class ShopperError extends Error {
 }
 
 // error: set when the first load failed, so pages can say so instead of showing "empty".
-let state = { wishlist: [], cart: [], ready: false, error: null }
+// products: the server's current name, price and availability of every saved piece, by id.
+let state = { wishlist: [], cart: [], products: {}, ready: false, error: null }
 const listeners = new Set()
 
 function publish(next) {
-  state = { wishlist: next.wishlist, cart: next.cart, ready: true, error: next.error ?? null }
+  state = {
+    wishlist: next.wishlist,
+    cart: next.cart,
+    products: next.products ?? state.products,
+    ready: true,
+    error: next.error ?? null,
+  }
   for (const listener of listeners) listener()
 }
 
@@ -53,6 +60,7 @@ async function send(path = '', { method = 'GET', json } = {}) {
       headers,
       body: json === undefined ? undefined : JSON.stringify(json),
       credentials: 'include',
+      cache: 'no-store',
     })
   } catch {
     throw new ShopperError('Can’t reach the shop right now. Check your connection and try again.')
@@ -68,9 +76,15 @@ async function send(path = '', { method = 'GET', json } = {}) {
     throw new ShopperError(message, data?.fields)
   }
   rememberSaved(data)
+  loadedAt = Date.now()
   publish(data)
   return data
 }
+
+// When the server last answered. The bag and wishlist pages ask again on open, but not if the
+// header asked a moment ago.
+let loadedAt = 0
+const FRESH_FOR = 10_000
 
 // One request at a time, in the order they were made. Each reply sets the cookie the next
 // request needs, so two quick taps (heart on, heart off) can't overwrite each other.
@@ -86,7 +100,8 @@ let loading = null
 
 /** Load the wishlist and cart. force: ask the API even if this browser saved nothing. */
 export function loadShopper({ force = false } = {}) {
-  if (!shopperEnabled || (state.ready && !state.error && !force)) return Promise.resolve(state)
+  const recent = Date.now() - loadedAt < FRESH_FOR
+  if (!shopperEnabled || (state.ready && !state.error && (!force || recent))) return Promise.resolve(state)
   if (!force && !state.error && !hasSaved()) {
     publish({ wishlist: [], cart: [] })
     return Promise.resolve(state)
@@ -111,6 +126,25 @@ export async function toggleWishlist(productId) {
     throw err
   }
   return !saved
+}
+
+/** The bag again, straight from the server. Throws if it can't be reached. */
+export const refreshShopper = () => request()
+
+/**
+ * The server's current price and availability for these pieces (never cached), by id. A piece
+ * that's been hidden or deleted is missing from the result. Used right before an order is sent.
+ */
+export async function checkOrder(ids) {
+  let res
+  try {
+    res = await fetch(`${API_URL}/shopper/check?ids=${ids.map(encodeURIComponent).join(',')}`, { cache: 'no-store' })
+  } catch {
+    throw new ShopperError('Can’t reach the shop to confirm your order. Check your connection and try again.')
+  }
+  const data = await res.json().catch(() => null)
+  if (!res.ok || !data?.products) throw new ShopperError(data?.error || 'We couldn’t confirm your order. Try again.')
+  return data.products
 }
 
 export const addToCart = (line) => request('/cart', { method: 'POST', json: line })

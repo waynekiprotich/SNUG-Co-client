@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { EVENTS, track } from '../../lib/analytics'
+import { applyOrderCheck } from '../../lib/catalog'
 import { AVAILABILITY_LABEL, formatPrice } from '../../lib/format'
+import { describeChange, orderChanges } from '../../lib/order'
 import { absoluteUrl } from '../../lib/seo'
-import { addToCart, shopperEnabled } from '../../lib/shopper'
-import { orderMessage, restockMessage, whatsappLink } from '../../lib/whatsapp'
+import { addToCart, checkOrder, shopperEnabled } from '../../lib/shopper'
+import { openWhatsApp, orderMessage, restockMessage, whatsappLink } from '../../lib/whatsapp'
 import { BagIcon, WhatsAppIcon } from '../Icons'
 import { WishlistButton } from '../WishlistButton'
 import { ChoiceGroup, QuantitySelector, TextOption } from './VariantSelector'
@@ -19,6 +21,8 @@ export function OrderPanel({ product }) {
   const [errors, setErrors] = useState({})
   const [ctaVisible, setCtaVisible] = useState(true)
   const [bag, setBag] = useState({ busy: false, message: null, added: false })
+  const [checking, setChecking] = useState(false)
+  const [orderNote, setOrderNote] = useState(null)
 
   const refs = { color: useRef(null), size: useRef(null) }
   const optionRefs = useRef({})
@@ -28,9 +32,7 @@ export function OrderPanel({ product }) {
   const productUrl = absoluteUrl(`/product/${product.slug}`)
   const selection = { color, size, options, quantity }
 
-  const href = unavailable
-    ? whatsappLink(restockMessage({ product, productUrl }))
-    : whatsappLink(orderMessage({ product, selection, productUrl }))
+  const restockHref = whatsappLink(restockMessage({ product, productUrl }))
 
   useEffect(() => {
     const el = ctaRef.current
@@ -59,24 +61,38 @@ export function OrderPanel({ product }) {
     return !first
   }
 
-  function handleOrder(event, placement) {
-    if (unavailable) {
-      track(EVENTS.whatsappClicked, { placement: 'restock', product: product.slug })
-      return
+  // The page's price may come from this browser's copy or the CDN, so the server is asked for the
+  // current price and availability right before WhatsApp opens. If either changed, nothing is
+  // sent: the page shows the new details and says what changed.
+  async function handleOrder(placement) {
+    if (checking || !validate()) return
+    setChecking(true)
+    setOrderNote(null)
+    const link = (current) => whatsappLink(orderMessage({ product: current, selection, productUrl }))
+    try {
+      const opened = await openWhatsApp(async () => {
+        if (!shopperEnabled) return link(product) // no API (local preview): nothing to check against
+        const fresh = (await checkOrder([product.id]))[product.id]
+        const changes = orderChanges([product], fresh ? { [product.id]: fresh } : {})
+        if (changes.length) {
+          const next = changes.every((c) => c.type === 'price') ? ' Check the details, then tap Order again.' : ''
+          setOrderNote(`${changes.map(describeChange).join(' ')}${next}`)
+          applyOrderCheck(product.id, fresh ?? null)
+          return null
+        }
+        return link({ ...product, ...fresh })
+      })
+      if (opened) {
+        track(EVENTS.whatsappOrderClicked, { product: product.slug, price: product.priceKES, color, size, quantity, placement })
+      }
+    } catch (err) {
+      setOrderNote(err.message)
+    } finally {
+      setChecking(false)
     }
-    if (!validate()) {
-      event.preventDefault()
-      return
-    }
-    track(EVENTS.whatsappOrderClicked, {
-      product: product.slug,
-      price: product.priceKES,
-      color,
-      size,
-      quantity,
-      placement,
-    })
   }
+
+  const trackRestock = () => track(EVENTS.whatsappClicked, { placement: 'restock', product: product.slug })
 
   async function handleAddToBag() {
     if (!validate()) return
@@ -175,16 +191,27 @@ export function OrderPanel({ product }) {
       </div>
 
       <div ref={ctaRef} className="mt-8">
-        <a
-          href={href}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => handleOrder(e, 'panel')}
-          className="btn btn-primary min-h-14 w-full text-base"
-        >
-          <WhatsAppIcon />
-          {ctaLabel}
-        </a>
+        {unavailable ? (
+          <a href={restockHref} target="_blank" rel="noopener noreferrer" onClick={trackRestock} className="btn btn-primary min-h-14 w-full text-base">
+            <WhatsAppIcon />
+            {ctaLabel}
+          </a>
+        ) : (
+          <button
+            type="button"
+            onClick={() => handleOrder('panel')}
+            disabled={checking}
+            className="btn btn-primary min-h-14 w-full text-base"
+          >
+            <WhatsAppIcon />
+            {checking ? 'Checking your order…' : ctaLabel}
+          </button>
+        )}
+        {orderNote && (
+          <p role="alert" className="mt-3 border-l-2 border-alert pl-4 text-sm font-medium text-alert">
+            {orderNote}
+          </p>
+        )}
         <div className="mt-3 flex gap-3">
           {shopperEnabled && !unavailable && (
             <button type="button" className="btn btn-secondary min-h-12 flex-1" onClick={handleAddToBag} disabled={bag.busy}>
@@ -228,16 +255,17 @@ export function OrderPanel({ product }) {
             <p className="truncate text-sm">{product.name}</p>
             <p className={`text-sm ${product.priceKES == null ? 'text-stone' : ''}`}>{formatPrice(product.priceKES)}</p>
           </div>
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => handleOrder(e, 'sticky')}
-            className="btn btn-primary shrink-0 px-5"
-          >
-            <WhatsAppIcon width={18} height={18} />
-            {unavailable ? 'Ask about restock' : 'Order'}
-          </a>
+          {unavailable ? (
+            <a href={restockHref} target="_blank" rel="noopener noreferrer" onClick={trackRestock} className="btn btn-primary shrink-0 px-5">
+              <WhatsAppIcon width={18} height={18} />
+              Ask about restock
+            </a>
+          ) : (
+            <button type="button" onClick={() => handleOrder('sticky')} disabled={checking} className="btn btn-primary shrink-0 px-5">
+              <WhatsAppIcon width={18} height={18} />
+              {checking ? 'Checking…' : 'Order'}
+            </button>
+          )}
         </div>
       </div>
     </div>

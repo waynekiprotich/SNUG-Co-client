@@ -44,7 +44,8 @@ function publish(data) {
 }
 
 async function fetchSettings() {
-  const res = await fetch(`${API_URL}/settings`, { headers: { Accept: 'application/json' } })
+  // A plain request, so the browser can reuse the copy index.html preloaded.
+  const res = await fetch(`${API_URL}/settings`)
   if (!res.ok) throw new Error(`Settings request failed (${res.status})`)
   const data = await res.json()
   registerImages(data.images)
